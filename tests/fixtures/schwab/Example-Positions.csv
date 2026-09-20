@@ -1,0 +1,8 @@
+"Positions for account SYNTHETIC ONLY as of 09/20/2026"
+
+"Symbol","Description","Qty (Quantity)","Price","Price Chng $ (Price Change $)","Price Chng % (Price Change %)","Mkt Val (Market Value)","Day Chng $ (Day Change $)","Day Chng % (Day Change %)","Cost Basis","Gain $ (Gain/Loss $)","Gain % (Gain/Loss %)","Reinvest?","Reinvest Capital Gains?","Asset Type",
+"DEMO-A","Example Technology, Inc.","10","$125.25","$0.00","0%","$1,252.50","$0.00","0%","$1,000.00","$252.50","25.25%","No","No","Equity",
+"DEMO-B","Example Index Fund","2.5","$100.10","$0.00","0%","$250.25","$0.00","0%","--","--","--","No","No","ETFs & Closed End Funds",
+"DEMO-A 12/18/2026 150.00 C","Synthetic short call","-1","$0.50","$0.00","0%","($50.00)","$0.00","0%","--","--","--","No","No","Option",
+"Cash & Cash Investments","Cash","--","--","--","--","$100.00","--","--","--","--","--","--","--","Cash",
+"Account Total","","","","","","$1,552.75","","","","","","","","",

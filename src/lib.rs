@@ -1,6 +1,12 @@
 //! UI shared by the native server and the browser's WebAssembly build.
 pub mod app;
 mod pages;
+pub mod portfolio;
+
+#[cfg(feature = "ssr")]
+pub mod config;
+#[cfg(feature = "ssr")]
+pub mod state;
 
 #[cfg(feature = "ssr")]
 pub mod server;

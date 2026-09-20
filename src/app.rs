@@ -49,7 +49,7 @@ pub fn App() -> impl IntoView {
                         <Route path=path!("/review") view=ReviewPage/>
                     </Routes>
                 </main>
-                <footer>"Stage 01"<span>"Sample workspace · no account data connected"</span></footer>
+                <footer>"Stage 02"<span>"Local CSV holdings · Research and Review are previews"</span></footer>
             </div>
         </Router>
     }
