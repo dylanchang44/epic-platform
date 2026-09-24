@@ -16,6 +16,9 @@ h1 { font-family: Georgia, serif; font-size: clamp(36px, 5vw, 48px); font-weight
 .intro { color: #745f61; line-height: 1.65; margin: 0 0 28px; }
 .notice { font-size: 13px; padding: 13px 16px; border-left: 3px solid #bc7d85; background: #f8eeee; margin-bottom: 24px; line-height: 1.6; }
 .panel { background: #fff; border: 1px solid #eadfe0; border-radius: 10px; padding: 28px; }
+.research-cards { display: grid; gap: 18px; margin-top: 24px; }
+.research-card dd { overflow-wrap: anywhere; }
+button:disabled { opacity: .6; cursor: wait; }
 .panel-heading { display: flex; justify-content: space-between; gap: 16px; align-items: center; margin-bottom: 20px; }
 h2 { font-size: 18px; font-weight: 600; margin: 0; }
 p { line-height: 1.7; }

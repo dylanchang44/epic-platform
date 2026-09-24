@@ -1,0 +1,27 @@
+{
+  "type": "data",
+  "nodes": [{
+    "type": "data",
+    "data": [
+      {"estimates":1,"priceTargets":2,"trust":3},
+      {"table":4},
+      {"currency":5},
+      {"lastUpdated":6},
+      {"quarterly":7},
+      "USD",
+      1754006400000,
+      {"lastDate":8,"dates":9,"fiscalYear":10,"fiscalQuarter":11,"revenue":12,"eps":13},
+      0,
+      [14],
+      [15],
+      [16],
+      [17],
+      [18],
+      "2025-06-30",
+      "2025",
+      "Q2",
+      1250000000,
+      2.5
+    ]
+  }]
+}

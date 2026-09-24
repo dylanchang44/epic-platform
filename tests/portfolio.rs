@@ -157,6 +157,7 @@ async fn failed_reload_preserves_snapshot_and_can_recover() {
     fs::write(&file, CSV).unwrap();
     let state = PortfolioState::new(AppConfig {
         schwab_data_dir: directory.path().into(),
+        ..AppConfig::default()
     });
     let before = state.reload().await;
     assert_eq!(before.status, LoadStatus::Loaded);
@@ -174,14 +175,21 @@ async fn failed_reload_preserves_snapshot_and_can_recover() {
 async fn api(directory: PathBuf) -> axum::Router {
     let portfolio = PortfolioState::new(AppConfig {
         schwab_data_dir: directory,
+        ..AppConfig::default()
     });
     portfolio.reload().await;
     let options = leptos::prelude::get_configuration(Some("Cargo.toml"))
         .unwrap()
         .leptos_options;
+    let research_dir = tempdir().unwrap();
+    let research = epic_platform::research::service::ResearchService::open(
+        &research_dir.path().join("research.db"),
+    )
+    .await;
     epic_platform::server::router(AppState {
         leptos_options: options,
         portfolio,
+        research,
     })
 }
 

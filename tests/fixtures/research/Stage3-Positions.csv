@@ -1,0 +1,7 @@
+Symbol,Description,Qty,Price,Mkt Val,Cost Basis,Asset Type
+nvda,Synthetic NVIDIA holding,2,100,200,150,Equity
+MSFT,Synthetic Microsoft holding,1,100,100,80,Equity
+ZZZZ,Synthetic unmatched stock,1,25,25,20,Equity
+SPY,Synthetic ETF holding,1,50,50,40,ETF
+NVDA 12/18/2026 100.00 C,Synthetic option,-1,0.50,-50,--,Option
+Cash & Cash Investments,Synthetic cash,--,--,100,--,Cash

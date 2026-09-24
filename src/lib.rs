@@ -2,6 +2,8 @@
 pub mod app;
 mod pages;
 pub mod portfolio;
+pub mod research;
+pub mod symbol;
 
 #[cfg(feature = "ssr")]
 pub mod config;

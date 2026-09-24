@@ -1,5 +1,10 @@
 # Stage 02 — local CSVs to live holdings
 
+This document records Stage 2. [Stage 3](architecture-stage-03.md) preserves this
+portfolio flow and adds internal, SQLite-backed research in the same process.
+Its implemented scope supersedes the suggested next-stage goal below; ConsensX
+is a source-code reference, not a separately running service.
+
 ## Purpose
 
 Add the first working portfolio slice to the existing Stage 1 Axum/Leptos app.

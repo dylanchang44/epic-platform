@@ -1,5 +1,9 @@
 # Stage 01 — one process, one browser, three pages
 
+This document records the Stage 1 baseline. [Stage 3](architecture-stage-03.md)
+now implements research as an internal module in the same process; ConsensX is
+a code reference and never needs to run as a separate EPIC dependency.
+
 ## Purpose
 
 Establish a working Linux application and understand its server/browser boundary

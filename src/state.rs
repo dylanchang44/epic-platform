@@ -11,6 +11,7 @@ use tokio::sync::{Mutex, RwLock};
 pub struct AppState {
     pub leptos_options: LeptosOptions,
     pub portfolio: Arc<PortfolioState>,
+    pub research: Arc<crate::research::service::ResearchService>,
 }
 
 impl axum::extract::FromRef<AppState> for LeptosOptions {
@@ -42,6 +43,25 @@ impl PortfolioState {
 
     pub async fn snapshot(&self) -> PortfolioSnapshot {
         self.snapshot.read().await.clone()
+    }
+
+    pub async fn research_input(
+        &self,
+    ) -> (LoadStatus, Option<Vec<crate::portfolio::HoldingSummary>>) {
+        let snapshot = self.snapshot.read().await;
+        let holdings = snapshot.portfolio.as_ref().map(|portfolio| {
+            portfolio
+                .positions
+                .iter()
+                .map(|p| crate::portfolio::HoldingSummary {
+                    held_symbol: p.symbol.clone(),
+                    stock_symbol: p.stock_symbol(),
+                    description: p.description.clone(),
+                    market_value: p.market_value,
+                })
+                .collect()
+        });
+        (snapshot.status.clone(), holdings)
     }
 
     pub async fn reload(self: &Arc<Self>) -> PortfolioSnapshot {

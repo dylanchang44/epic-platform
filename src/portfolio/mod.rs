@@ -18,6 +18,29 @@ pub struct Position {
     pub asset_type: String,
 }
 
+impl Position {
+    pub fn stock_symbol(&self) -> Option<crate::symbol::StockSymbol> {
+        let asset = self.asset_type.trim().to_ascii_lowercase();
+        if !matches!(
+            asset.as_str(),
+            "" | "equity" | "equities" | "stock" | "stocks" | "common stock"
+        ) || self.symbol.trim().eq_ignore_ascii_case("cash")
+        {
+            return None;
+        }
+        crate::symbol::StockSymbol::parse(&self.symbol).ok()
+    }
+}
+
+/// Owned, minimal projection for consumers; no state guard or raw CSV contents.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HoldingSummary {
+    pub held_symbol: String,
+    pub stock_symbol: Option<crate::symbol::StockSymbol>,
+    pub description: String,
+    pub market_value: Decimal,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PortfolioSummary {
     pub position_count: usize,

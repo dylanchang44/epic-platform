@@ -10,7 +10,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Read cargo-leptos settings when launched directly from the project root.
     let options = get_configuration(Some("Cargo.toml"))?.leptos_options;
     let address = options.site_addr;
-    let portfolio = PortfolioState::new(AppConfig::from_env());
+    let config = AppConfig::from_env();
+    let research =
+        epic_platform::research::service::ResearchService::open(&config.research_db_path).await;
+    if let Some(error) = research.initialization_error() {
+        eprintln!("Research unavailable: {error}");
+    }
+    let portfolio = PortfolioState::new(config);
     let initial = portfolio.reload().await;
     if let Some(error) = initial.error {
         eprintln!("Portfolio unavailable: {}", error.message);
@@ -18,6 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = AppState {
         leptos_options: options,
         portfolio,
+        research,
     };
     let listener = tokio::net::TcpListener::bind(address).await?;
     println!("EPIC Platform: http://{address}");
