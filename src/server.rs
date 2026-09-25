@@ -19,6 +19,7 @@ pub fn router(state: AppState) -> Router {
     let routes = generate_route_list(App);
     let context = state.portfolio.clone();
     let research_context = state.research.clone();
+    let review_context = state.review.clone();
     Router::new()
         .route(
             "/",
@@ -27,6 +28,8 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(|| async { "ok\n" }))
         .route("/api/portfolio", get(get_portfolio))
         .route("/api/portfolio/reload", post(reload_portfolio))
+        .route("/api/reviews", get(list_reviews).post(create_review))
+        .route("/api/reviews/{id}", get(get_review))
         .route("/api/research/holdings", get(get_research_holdings))
         .route(
             "/api/research/companies/{symbol}",
@@ -42,6 +45,7 @@ pub fn router(state: AppState) -> Router {
             move || {
                 provide_context(context.clone());
                 provide_context(research_context.clone());
+                provide_context(review_context.clone());
             },
             {
                 let options = options.clone();
@@ -59,6 +63,68 @@ pub fn router(state: AppState) -> Router {
             },
         ))
         .with_state(state)
+}
+
+type ReviewHttpError = (StatusCode, Json<crate::review::domain::ReviewApiError>);
+
+fn review_error(error: crate::review::domain::ReviewError) -> ReviewHttpError {
+    use crate::review::domain::ReviewError;
+    let status = match error {
+        ReviewError::NoPortfolio => StatusCode::CONFLICT,
+        ReviewError::InvalidPortfolio => StatusCode::UNPROCESSABLE_ENTITY,
+        ReviewError::NotFound => StatusCode::NOT_FOUND,
+        ReviewError::InvalidId => StatusCode::BAD_REQUEST,
+        ReviewError::Calculation => StatusCode::INTERNAL_SERVER_ERROR,
+        _ => StatusCode::SERVICE_UNAVAILABLE,
+    };
+    let message = error.to_string();
+    (
+        status,
+        Json(crate::review::domain::ReviewApiError { error, message }),
+    )
+}
+
+async fn create_review(
+    State(state): State<AppState>,
+) -> Result<
+    (
+        StatusCode,
+        [(header::HeaderName, String); 1],
+        Json<crate::review::domain::SavedReview>,
+    ),
+    ReviewHttpError,
+> {
+    let review = state
+        .review
+        .create_portfolio_review(&state.portfolio, &state.research)
+        .await
+        .map_err(review_error)?;
+    Ok((
+        StatusCode::CREATED,
+        [(header::LOCATION, format!("/api/reviews/{}", review.id))],
+        Json(review),
+    ))
+}
+
+async fn list_reviews(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<crate::review::domain::ReviewHistoryEntry>>, ReviewHttpError> {
+    state.review.history().await.map(Json).map_err(review_error)
+}
+
+async fn get_review(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::review::domain::ReviewDetail>, ReviewHttpError> {
+    let id = id
+        .parse::<i64>()
+        .map_err(|_| review_error(crate::review::domain::ReviewError::InvalidId))?;
+    state
+        .review
+        .detail(id)
+        .await
+        .map(Json)
+        .map_err(review_error)
 }
 
 async fn get_research_holdings(

@@ -3,11 +3,13 @@ use std::path::PathBuf;
 
 const DEFAULT_SCHWAB_DATA_DIR: &str = "/home/dylan/schwab-data";
 const DEFAULT_RESEARCH_DB_PATH: &str = "data/research.db";
+const DEFAULT_REVIEW_DB_PATH: &str = "data/reviews.db";
 
 #[derive(Clone)]
 pub struct AppConfig {
     pub schwab_data_dir: PathBuf,
     pub research_db_path: PathBuf,
+    pub review_db_path: PathBuf,
 }
 
 impl Default for AppConfig {
@@ -15,6 +17,7 @@ impl Default for AppConfig {
         Self {
             schwab_data_dir: DEFAULT_SCHWAB_DATA_DIR.into(),
             research_db_path: DEFAULT_RESEARCH_DB_PATH.into(),
+            review_db_path: DEFAULT_REVIEW_DB_PATH.into(),
         }
     }
 }
@@ -28,6 +31,9 @@ impl AppConfig {
             research_db_path: std::env::var_os("RESEARCH_DB_PATH")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| DEFAULT_RESEARCH_DB_PATH.into()),
+            review_db_path: std::env::var_os("REVIEW_DB_PATH")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| DEFAULT_REVIEW_DB_PATH.into()),
         }
     }
 }

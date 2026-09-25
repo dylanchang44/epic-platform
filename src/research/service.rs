@@ -32,6 +32,21 @@ impl Drop for RefreshPermit<'_> {
 }
 
 impl ResearchService {
+    /// Read-only application boundary; never contacts the external source.
+    pub async fn latest_saved(
+        &self,
+        symbols: &[StockSymbol],
+    ) -> Result<Vec<SavedResearchSnapshot>, ResearchError> {
+        if symbols.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.repository
+            .as_ref()
+            .map_err(Clone::clone)?
+            .latest_saved(symbols)
+            .await
+    }
+
     pub async fn open(path: &Path) -> Arc<Self> {
         Self::with_source(path, ResearchSource::public_source()).await
     }

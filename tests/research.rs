@@ -85,13 +85,18 @@ async fn portfolio(directory: PathBuf) -> Arc<PortfolioState> {
     state.reload().await;
     state
 }
-fn app(portfolio: Arc<PortfolioState>, research: Arc<ResearchService>) -> Router {
+async fn app(portfolio: Arc<PortfolioState>, research: Arc<ResearchService>) -> Router {
+    let directory = tempdir().unwrap();
     epic_platform::server::router(AppState {
         leptos_options: leptos::prelude::get_configuration(Some("Cargo.toml"))
             .unwrap()
             .leptos_options,
         portfolio,
         research,
+        review: epic_platform::review::service::ReviewService::open(
+            &directory.path().join("reviews.db"),
+        )
+        .await,
     })
 }
 async fn call(app: &Router, method: &str, path: &str) -> (StatusCode, serde_json::Value) {
@@ -414,7 +419,7 @@ async fn no_portfolio_and_database_initialization_failure_leave_portfolio_usable
     assert!(!result.portfolio_available);
     assert!(result.holdings.is_empty());
     let holdings = portfolio(fixture()).await;
-    let router = app(holdings, research);
+    let router = app(holdings, research).await;
     assert_eq!(
         call(&router, "GET", "/api/portfolio").await.1["status"],
         "loaded"
@@ -488,7 +493,7 @@ async fn http_contract_success_missing_unsupported_and_source_failure() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("research.db");
     let upstream = response_mock(StatusCode::OK, FORECAST).await;
-    let router = app(portfolio(fixture()).await, service(&path, &upstream).await);
+    let router = app(portfolio(fixture()).await, service(&path, &upstream).await).await;
     let never = call(&router, "GET", "/api/research/companies/NVDA").await;
     assert_eq!(never.0, StatusCode::OK);
     assert_eq!(never.1["status"], "never_refreshed");
@@ -516,7 +521,7 @@ async fn http_contract_success_missing_unsupported_and_source_failure() {
     );
     drop(upstream);
     let upstream = response_mock(StatusCode::BAD_GATEWAY, "bad gateway").await;
-    let router = app(portfolio(fixture()).await, service(&path, &upstream).await);
+    let router = app(portfolio(fixture()).await, service(&path, &upstream).await).await;
     let failed = call(&router, "POST", "/api/research/companies/NVDA/refresh").await;
     assert_eq!(failed.0, StatusCode::BAD_GATEWAY);
     assert_eq!(failed.1["outcome"], "failed");

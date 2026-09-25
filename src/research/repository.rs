@@ -1,5 +1,5 @@
 //! The sole SQLite owner. SQL rows never escape this module.
-use super::domain::{ResearchError, ResearchSnapshot};
+use super::domain::{ResearchError, ResearchSnapshot, SavedResearchSnapshot};
 use crate::symbol::StockSymbol;
 use sqlx::{
     SqlitePool,
@@ -14,6 +14,28 @@ pub struct ResearchRepository {
 }
 
 impl ResearchRepository {
+    /// One SELECT gives consumers a consistent view of latest saved periods.
+    /// No per-company reads that could straddle a concurrent research commit.
+    pub async fn latest_saved(
+        &self,
+        symbols: &[StockSymbol],
+    ) -> Result<Vec<SavedResearchSnapshot>, ResearchError> {
+        if symbols.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows: Vec<(i64, String, String)> = sqlx::query_as("SELECT s.id, s.symbol, s.snapshot_json FROM research_snapshots s WHERE NOT EXISTS (SELECT 1 FROM research_snapshots newer WHERE newer.symbol = s.symbol AND newer.period_end > s.period_end)")
+            .fetch_all(&self.pool).await.map_err(repository_error)?;
+        rows.into_iter()
+            .filter(|(_, symbol, _)| symbols.iter().any(|s| s.as_str() == symbol))
+            .map(|(id, _, json)| {
+                Ok(SavedResearchSnapshot {
+                    id,
+                    snapshot: decode(&json)?,
+                })
+            })
+            .collect()
+    }
+
     pub async fn open(path: &Path) -> Result<Self, ResearchError> {
         if path.as_os_str().is_empty() {
             return Err(ResearchError::Initialization);

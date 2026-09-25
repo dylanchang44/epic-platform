@@ -190,6 +190,10 @@ async fn api(directory: PathBuf) -> axum::Router {
         leptos_options: options,
         portfolio,
         research,
+        review: epic_platform::review::service::ReviewService::open(
+            &research_dir.path().join("reviews.db"),
+        )
+        .await,
     })
 }
 

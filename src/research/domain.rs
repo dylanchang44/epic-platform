@@ -61,6 +61,13 @@ pub struct ResearchSnapshot {
     pub sources: Vec<SourceLink>,
 }
 
+/// Public saved-record identity for consumers that need stable provenance.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SavedResearchSnapshot {
+    pub id: i64,
+    pub snapshot: ResearchSnapshot,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ResearchError {

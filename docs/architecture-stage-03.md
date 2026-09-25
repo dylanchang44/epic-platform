@@ -1,5 +1,10 @@
 # Stage 03 — research inside a modular monolith
 
+This document records Stage 3. [Stage 4](architecture-stage-04.md) adds immutable
+portfolio reviews and supersedes the suggested next-stage goal below. Research
+still owns its original database; Review owns a separate database and reads
+saved research through a public interface that also exposes snapshot IDs.
+
 ## Purpose and boundary
 
 Add the smallest durable research slice to the existing Axum + Leptos app:

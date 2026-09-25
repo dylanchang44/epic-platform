@@ -16,6 +16,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(error) = research.initialization_error() {
         eprintln!("Research unavailable: {error}");
     }
+    let review = epic_platform::review::service::ReviewService::open(&config.review_db_path).await;
+    if let Some(error) = review.initialization_error() {
+        eprintln!("Review unavailable: {error}");
+    }
     let portfolio = PortfolioState::new(config);
     let initial = portfolio.reload().await;
     if let Some(error) = initial.error {
@@ -25,6 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         leptos_options: options,
         portfolio,
         research,
+        review,
     };
     let listener = tokio::net::TcpListener::bind(address).await?;
     println!("EPIC Platform: http://{address}");

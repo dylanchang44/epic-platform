@@ -12,6 +12,7 @@ pub struct AppState {
     pub leptos_options: LeptosOptions,
     pub portfolio: Arc<PortfolioState>,
     pub research: Arc<crate::research::service::ResearchService>,
+    pub review: Arc<crate::review::service::ReviewService>,
 }
 
 impl axum::extract::FromRef<AppState> for LeptosOptions {
