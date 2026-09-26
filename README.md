@@ -70,7 +70,7 @@ press **Reload local data**. A failed reload keeps the last good snapshot and
 marks it stale. Restarting loses memory; startup attempts to load the files again.
 
 Open <http://127.0.0.1:3000>. `/` redirects to `/portfolio`; the other pages are
-`/research` and `/review`. On Review, click **Create portfolio review**, then
+`/research`, `/review`, and `/watchlist`. On Review, click **Create portfolio review**, then
 select a history entry to open it. Navigation supports direct URLs, reload,
 and browser back/forward.
 Stop with **Ctrl+C**. If opening a new fish session, repeat `fish_add_path` above.
@@ -183,11 +183,12 @@ cargo leptos watch
 
 ## Durable portfolio review jobs (Linux / fish)
 
-Review and Jobs share the execution SQLite database, configured by `REVIEW_DB_PATH` (default
+Review, Jobs, and Watchlist share the execution SQLite database, configured by `REVIEW_DB_PATH` (default
 `data/reviews.db`, relative to the working directory). Use a different path from
 `RESEARCH_DB_PATH`: their versioned migrations and ownership are independent.
-Jobs owns queue/attempt tables; Review owns immutable review records. One migration
-sequence upgrades existing Stage 4 databases in place. Existing databases are not moved.
+Jobs owns queue/attempt tables; Review owns immutable review records; Watchlist owns
+immutable briefings. One migration sequence upgrades Stage 4/5 databases in place.
+Existing databases are not moved.
 Review files contain saved holding values;
 database and WAL/SHM files stay local and are ignored by Git. No raw CSV is stored.
 
@@ -270,8 +271,10 @@ immediately previous saved review. Those differences are not investment returns.
 
 POST now returns **202 Accepted**, `Location: /api/jobs/{id}`, and
 `{job_id,status,status_url}`. `Idempotency-Key` is optional (1–128 ASCII letters,
-digits, `.`, `_`, `-`); its uniqueness lasts for the life of this database.
-Repeating a key returns the existing job, including its current terminal status.
+digits, `.`, `_`, `-`); uniqueness is scoped to workflow type and normalized
+submitted input for the life of this database. Repeating a key within that scope
+returns the existing job, including its current terminal status. Review has no
+submitted payload and retains its Stage 5 key behavior.
 Use a fresh key for a separate intentional review. The page generates UUIDs and
 retains a submission key on a request error. `GET /api/jobs` returns at most 30
 recent jobs. Retry returns 202 with the same ID; only failed/interrupted jobs
@@ -304,13 +307,105 @@ Neither endpoint contacts the research provider. Missing portfolio data does
 not make the process unready; submission explains that data must be loaded.
 
 Job logs are structured JSON with job ID, kind, attempt, state/progress, elapsed
-execution time and result review ID. For explicit logging in fish:
+execution time and typed result ID. For explicit logging in fish:
 
 ```fish
 env RUST_LOG=epic_platform=info SCHWAB_DATA_DIR=/home/dylan/schwab-data RESEARCH_DB_PATH="$PWD/data/research.db" REVIEW_DB_PATH="$PWD/data/reviews.db" ./target/debug/epic-platform
 # Deterministic offline recovery tests, including queued restart and crash-after-commit:
 cargo test --locked --features ssr --test jobs
 ```
+
+## Watchlist briefings (Linux / fish)
+
+Stage 6 completes the core roadmap with a second workflow on the **same worker**.
+No separate ConsensX process is needed. Briefings use only saved research and do
+not require loaded portfolio holdings or contact an external provider.
+
+In fish, build and start the single application:
+
+```fish
+cd /home/dylan/git_repo/epic-platform
+fish_add_path --path "$PWD/target/tools/bin"
+set -gx SCHWAB_DATA_DIR /home/dylan/schwab-data
+set -gx RESEARCH_DB_PATH "$PWD/data/research.db"
+set -gx REVIEW_DB_PATH "$PWD/data/reviews.db"
+set -gx WATCHLIST_SYMBOLS 'MSFT,AMD,GOOGL'
+cargo leptos build
+./target/debug/epic-platform
+```
+
+For synthetic portfolio data instead, set `SCHWAB_DATA_DIR` to
+`"$PWD/tests/fixtures/research"` before starting. Use separate demo database paths
+if you want to keep demonstration records apart from your saved reviews.
+
+Open <http://127.0.0.1:3000/watchlist>. The page shows normalized configured symbols,
+**Create briefing**, recent jobs, retry controls and saved history. An unset or
+blank watchlist has a clear empty state and submission returns 422. Set the
+variable and restart to change it. Up to 32 comma-separated entries are accepted;
+whitespace/case are normalized, duplicates removed and symbols sorted. Invalid
+entries (including empty comma entries or option syntax) reject the whole list.
+Dot/dash share classes match exactly. This is a user-declared equity list, not a
+security-master lookup: unknown symbols remain **Never refreshed**, not invented
+companies. Only Research's existing registry supports manual source refresh.
+
+In a second fish terminal (Python 3 extracts JSON IDs):
+
+```fish
+curl --fail http://127.0.0.1:3000/health
+curl --fail-with-body http://127.0.0.1:3000/ready
+curl --fail-with-body http://127.0.0.1:3000/api/watchlist
+
+# Optional separate action; requires internet and is NOT part of the briefing job.
+curl --fail-with-body -X POST http://127.0.0.1:3000/api/research/companies/MSFT/refresh
+
+set briefing_key (cat /proc/sys/kernel/random/uuid)
+set briefing_job (curl --fail-with-body -X POST -H "Idempotency-Key: $briefing_key" http://127.0.0.1:3000/api/watchlist/briefings | python3 -c 'import json,sys; print(json.load(sys.stdin)["job_id"])')
+# Same workflow + same normalized server list + same key => same job (202).
+curl --fail-with-body -i -X POST -H "Idempotency-Key: $briefing_key" http://127.0.0.1:3000/api/watchlist/briefings
+curl --fail-with-body "http://127.0.0.1:3000/api/jobs/$briefing_job"
+curl --fail-with-body 'http://127.0.0.1:3000/api/jobs?kind=watchlist_briefing'
+
+set briefing_status queued
+while contains -- $briefing_status queued running
+    sleep 2
+    set briefing_status (curl --fail-with-body "http://127.0.0.1:3000/api/jobs/$briefing_job" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])')
+    echo $briefing_status
+end
+# Only after succeeded; result.type is watchlist_briefing, not review.
+set briefing_id (curl --fail-with-body "http://127.0.0.1:3000/api/jobs/$briefing_job" | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["id"])')
+curl --fail-with-body http://127.0.0.1:3000/api/watchlist/briefings
+curl --fail-with-body "http://127.0.0.1:3000/api/watchlist/briefings/$briefing_id"
+
+# Only if failed/interrupted, after fixing the cause:
+curl --fail-with-body -i -X POST "http://127.0.0.1:3000/api/jobs/$briefing_job/retry"
+```
+
+The queued job freezes its normalized symbol list. Execution reads latest saved
+research (greatest earnings-period end date); missing data produces a visible
+Never refreshed entry. A Research database error fails the job rather than
+pretending no snapshots exist. A retry retains the symbols and job identity,
+but reads then-latest saved research if no result was committed. An existing
+origin result is reused, including after a crash before the job-success update.
+Changing the configured list changes submission identity; it cannot change a
+queued job or old briefing. A Review request using the same key is a different
+workflow and cannot collide.
+
+Stop with Ctrl+C and rerun `./target/debug/epic-platform` in the original terminal
+with the same database paths. Then repeat:
+
+```fish
+curl --fail-with-body "http://127.0.0.1:3000/api/jobs/$briefing_job"
+curl --fail-with-body http://127.0.0.1:3000/api/watchlist/briefings
+curl --fail-with-body "http://127.0.0.1:3000/api/watchlist/briefings/$briefing_id"
+cargo test --locked --features ssr --test watchlist
+cargo test --locked --features ssr
+```
+
+Jobs and briefings persist. Later research refreshes cannot change old briefing
+facts, dates, original source links or snapshot references. Browser refresh
+restores up to 30 jobs per workflow and resumes two-second polling while active.
+Both workflows share retry/recovery, readiness and the five-second shutdown grace.
+The core roadmap is complete; additional workflows are optional, driven by use.
 
 ## Checks
 
@@ -327,6 +422,8 @@ execution environments. Plain `cargo run` does not build the browser assets;
 use cargo-leptos and run its built executable. The manifest passes `--locked`
 to both Cargo builds. Node, npm, Trunk, and handwritten JavaScript are not needed.
 
+Read [Stage 6 architecture](docs/architecture-stage-06.md) for the two workflows,
+normalized durable inputs, scoped idempotency, shared runner/UI and briefing history.
 Read [Stage 5 architecture](docs/architecture-stage-05.md) for the durable queue,
 atomic claims, polling, idempotency, recovery, shutdown and readiness.
 Read [Stage 4 architecture](docs/architecture-stage-04.md) for review orchestration,

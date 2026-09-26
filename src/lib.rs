@@ -6,6 +6,7 @@ pub mod portfolio;
 pub mod research;
 pub mod review;
 pub mod symbol;
+pub mod watchlist;
 
 #[cfg(feature = "ssr")]
 pub mod config;

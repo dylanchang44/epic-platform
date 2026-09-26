@@ -12,7 +12,7 @@ pub struct ReviewRepository {
 }
 
 impl ReviewRepository {
-    /// Jobs shares this execution database, but owns its own repository/tables.
+    /// Jobs and Watchlist share this execution database, with separate owned tables.
     pub fn execution_pool(&self) -> SqlitePool {
         self.pool.clone()
     }

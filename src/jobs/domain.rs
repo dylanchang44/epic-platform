@@ -4,6 +4,31 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum JobKind {
     PortfolioReview,
+    WatchlistBriefing,
+}
+impl JobKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PortfolioReview => "portfolio_review",
+            Self::WatchlistBriefing => "watchlist_briefing",
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum JobInput {
+    PortfolioReview,
+    WatchlistBriefing {
+        symbols: crate::watchlist::domain::WatchlistInput,
+    },
+}
+impl JobInput {
+    pub fn kind(&self) -> JobKind {
+        match self {
+            Self::PortfolioReview => JobKind::PortfolioReview,
+            Self::WatchlistBriefing { .. } => JobKind::WatchlistBriefing,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,9 +66,11 @@ impl JobStatus {
 pub enum JobStep {
     Queued,
     SnapshottingPortfolio,
+    ReadingWatchlist,
     LoadingResearch,
     CalculatingReview,
     PersistingReview,
+    PersistingBriefing,
     Completed,
 }
 
@@ -52,9 +79,11 @@ impl JobStep {
         match self {
             Self::Queued => "queued",
             Self::SnapshottingPortfolio => "snapshotting_portfolio",
+            Self::ReadingWatchlist => "reading_watchlist",
             Self::LoadingResearch => "loading_research",
             Self::CalculatingReview => "calculating_review",
             Self::PersistingReview => "persisting_review",
+            Self::PersistingBriefing => "persisting_briefing",
             Self::Completed => "completed",
         }
     }
@@ -74,12 +103,27 @@ pub struct JobFailure {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum JobResult {
     Review { id: i64 },
+    WatchlistBriefing { id: i64 },
+}
+impl JobResult {
+    pub fn id(&self) -> i64 {
+        match self {
+            Self::Review { id } | Self::WatchlistBriefing { id } => *id,
+        }
+    }
+    pub fn kind(&self) -> JobKind {
+        match self {
+            Self::Review { .. } => JobKind::PortfolioReview,
+            Self::WatchlistBriefing { .. } => JobKind::WatchlistBriefing,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Job {
     pub id: i64,
     pub kind: JobKind,
+    pub input: JobInput,
     pub status: JobStatus,
     pub created_at: String,
     pub queued_at: String,
@@ -119,18 +163,25 @@ pub enum JobError {
     Unavailable,
     NoPortfolio,
     InvalidPortfolio,
+    Watchlist {
+        error: crate::watchlist::domain::WatchlistError,
+    },
 }
 impl std::fmt::Display for JobError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Self::Watchlist { error } = self {
+            return error.fmt(f);
+        }
         f.write_str(match self {
             Self::Repository => "Job database operation failed. Check job status before resubmitting.",
             Self::NotFound => "This job does not exist.",
             Self::InvalidId => "Job ID must be a positive integer.",
             Self::InvalidKey => "Idempotency-Key must contain 1–128 ASCII letters, digits, dots, underscores or hyphens.",
             Self::InvalidTransition => "This job cannot make that state transition. Only failed or interrupted jobs can be retried.",
-            Self::Unavailable => "The review worker is unavailable. Check readiness and restart after resolving the server error.",
+            Self::Unavailable => "The job worker is unavailable. Check readiness and restart after resolving the server error.",
             Self::NoPortfolio => "Load local Schwab data on Portfolio before creating a review.",
             Self::InvalidPortfolio => "The portfolio is empty or inconsistent. Reload valid local data.",
+            Self::Watchlist { .. } => unreachable!(),
         })
     }
 }
@@ -145,6 +196,7 @@ pub struct JobApiError {
 #[derive(Debug, Clone)]
 pub enum ExecutionError {
     Review(crate::review::domain::ReviewError),
+    Watchlist(crate::watchlist::domain::WatchlistError),
     Interrupted,
     Panicked,
 }
@@ -152,8 +204,13 @@ impl std::fmt::Display for ExecutionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Review(error) => error.fmt(f),
-            Self::Interrupted => f.write_str("Execution stopped before a saved review was found. You may retry manually."),
-            Self::Panicked => f.write_str("The review task stopped unexpectedly. Check the server log; you may retry manually."),
+            Self::Watchlist(error) => error.fmt(f),
+            Self::Interrupted => f.write_str(
+                "Execution stopped before a saved result was found. You may retry manually.",
+            ),
+            Self::Panicked => f.write_str(
+                "The job task stopped unexpectedly. Check the server log; you may retry manually.",
+            ),
         }
     }
 }

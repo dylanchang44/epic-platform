@@ -15,6 +15,7 @@ macro_rules! select {
 struct Row {
     id: i64,
     kind: String,
+    input_json: String,
     status: String,
     created_at: String,
     queued_at: String,
@@ -31,9 +32,15 @@ impl Row {
         fn decode<T: serde::de::DeserializeOwned>(s: String) -> Result<T, JobError> {
             serde_json::from_value(serde_json::Value::String(s)).map_err(failure)
         }
+        let kind = decode(self.kind)?;
+        let input: JobInput = serde_json::from_str(&self.input_json).map_err(failure)?;
+        if input.kind() != kind {
+            return Err(JobError::Repository);
+        }
         Ok(Job {
             id: self.id,
-            kind: decode(self.kind)?,
+            kind,
+            input,
             status: decode(self.status)?,
             created_at: self.created_at,
             queued_at: self.queued_at,
@@ -42,7 +49,10 @@ impl Row {
             attempt_count: self.attempt_count,
             step: decode(self.step)?,
             error: self.error,
-            result: self.result_id.map(|id| JobResult::Review { id }),
+            result: self.result_id.map(|id| match kind {
+                JobKind::PortfolioReview => JobResult::Review { id },
+                JobKind::WatchlistBriefing => JobResult::WatchlistBriefing { id },
+            }),
             previous_failures: serde_json::from_str(&self.failures_json).map_err(failure)?,
         })
     }
@@ -64,25 +74,39 @@ impl JobRepository {
     }
 
     pub async fn by_key(&self, key: &str) -> Result<Option<Job>, JobError> {
-        sqlx::query_as::<_, Row>(select!(" WHERE idempotency_key = ?"))
-            .bind(key)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(failure)?
-            .map(Row::decode)
-            .transpose()
+        self.by_input_key(&JobInput::PortfolioReview, key).await
+    }
+    pub async fn by_input_key(&self, input: &JobInput, key: &str) -> Result<Option<Job>, JobError> {
+        sqlx::query_as::<_, Row>(select!(
+            " WHERE kind=? AND input_json=? AND idempotency_key = ?"
+        ))
+        .bind(input.kind().as_str())
+        .bind(serde_json::to_string(input).map_err(failure)?)
+        .bind(key)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(failure)?
+        .map(Row::decode)
+        .transpose()
     }
 
     pub async fn enqueue(&self, key: Option<&str>) -> Result<Job, JobError> {
+        self.enqueue_input(&JobInput::PortfolioReview, key).await
+    }
+    pub async fn enqueue_input(
+        &self,
+        input: &JobInput,
+        key: Option<&str>,
+    ) -> Result<Job, JobError> {
         let now = now();
         // A concurrent repeated submission loses the unique-key race and reads
         // the existing job. A NULL key always means a separate intentional job.
-        let id: Option<i64> = sqlx::query_scalar("INSERT INTO jobs(kind,status,created_at,queued_at,step,idempotency_key) VALUES ('portfolio_review','queued',?,?,'queued',?) ON CONFLICT(idempotency_key) DO NOTHING RETURNING id")
-            .bind(&now).bind(&now).bind(key).fetch_optional(&self.pool).await.map_err(failure)?;
+        let id: Option<i64> = sqlx::query_scalar("INSERT INTO jobs(kind,input_json,status,created_at,queued_at,step,idempotency_key) VALUES (?,?,'queued',?,?,'queued',?) ON CONFLICT(kind,input_json,idempotency_key) DO NOTHING RETURNING id")
+            .bind(input.kind().as_str()).bind(serde_json::to_string(input).map_err(failure)?).bind(&now).bind(&now).bind(key).fetch_optional(&self.pool).await.map_err(failure)?;
         match id {
             Some(id) => self.get(id).await,
             None => self
-                .by_key(key.ok_or(JobError::Repository)?)
+                .by_input_key(input, key.ok_or(JobError::Repository)?)
                 .await?
                 .ok_or(JobError::Repository),
         }
@@ -102,13 +126,20 @@ impl JobRepository {
     }
 
     pub async fn recent(&self) -> Result<Vec<Job>, JobError> {
-        sqlx::query_as::<_, Row>(select!(" ORDER BY id DESC LIMIT 30"))
-            .fetch_all(&self.pool)
-            .await
-            .map_err(failure)?
-            .into_iter()
-            .map(Row::decode)
-            .collect()
+        self.recent_kind(None).await
+    }
+    pub async fn recent_kind(&self, kind: Option<JobKind>) -> Result<Vec<Job>, JobError> {
+        sqlx::query_as::<_, Row>(select!(
+            " WHERE (? IS NULL OR kind=?) ORDER BY id DESC LIMIT 30"
+        ))
+        .bind(kind.map(JobKind::as_str))
+        .bind(kind.map(JobKind::as_str))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(failure)?
+        .into_iter()
+        .map(Row::decode)
+        .collect()
     }
 
     pub async fn running(&self) -> Result<Vec<Job>, JobError> {
@@ -124,7 +155,7 @@ impl JobRepository {
     pub async fn claim(&self) -> Result<Option<Job>, JobError> {
         // One SQLite write statement obtains the writer lock before selection.
         // No SELECT-then-UPDATE race, even with two callers.
-        let id: Option<i64> = sqlx::query_scalar("UPDATE jobs SET status='running',started_at=?,attempt_count=attempt_count+1,step='snapshotting_portfolio' WHERE id=(SELECT id FROM jobs WHERE status='queued' ORDER BY queued_at,id LIMIT 1) AND status='queued' RETURNING id")
+        let id: Option<i64> = sqlx::query_scalar("UPDATE jobs SET status='running',started_at=?,attempt_count=attempt_count+1,step=CASE kind WHEN 'portfolio_review' THEN 'snapshotting_portfolio' ELSE 'reading_watchlist' END WHERE id=(SELECT id FROM jobs WHERE status='queued' ORDER BY queued_at,id LIMIT 1) AND status='queued' RETURNING id")
             .bind(now()).fetch_optional(&self.pool).await.map_err(failure)?;
         match id {
             Some(id) => self.get(id).await.map(Some),
@@ -133,11 +164,18 @@ impl JobRepository {
     }
 
     pub async fn progress(&self, id: i64, attempt: i64, step: JobStep) -> Result<(), JobError> {
-        let previous = match step {
-            JobStep::SnapshottingPortfolio => "snapshotting_portfolio",
-            JobStep::LoadingResearch => "snapshotting_portfolio",
-            JobStep::CalculatingReview => "loading_research",
-            JobStep::PersistingReview => "calculating_review",
+        let job = self.get(id).await?;
+        let previous = match (job.kind, step) {
+            (
+                JobKind::PortfolioReview,
+                JobStep::SnapshottingPortfolio | JobStep::LoadingResearch,
+            ) => "snapshotting_portfolio",
+            (JobKind::PortfolioReview, JobStep::CalculatingReview) => "loading_research",
+            (JobKind::PortfolioReview, JobStep::PersistingReview) => "calculating_review",
+            (JobKind::WatchlistBriefing, JobStep::ReadingWatchlist | JobStep::LoadingResearch) => {
+                "reading_watchlist"
+            }
+            (JobKind::WatchlistBriefing, JobStep::PersistingBriefing) => "loading_research",
             _ => return Err(JobError::InvalidTransition),
         };
         changed(sqlx::query("UPDATE jobs SET step=? WHERE id=? AND attempt_count=? AND status='running' AND step=?")
@@ -145,8 +183,17 @@ impl JobRepository {
     }
 
     pub async fn succeed(&self, id: i64, attempt: i64, review_id: i64) -> Result<(), JobError> {
-        changed(sqlx::query("UPDATE jobs SET status='succeeded',step='completed',completed_at=?,result_id=?,error=NULL WHERE id=? AND attempt_count=? AND status='running'")
-            .bind(now()).bind(review_id).bind(id).bind(attempt).execute(&self.pool).await.map_err(failure)?.rows_affected())
+        self.succeed_result(id, attempt, JobResult::Review { id: review_id })
+            .await
+    }
+    pub async fn succeed_result(
+        &self,
+        id: i64,
+        attempt: i64,
+        result: JobResult,
+    ) -> Result<(), JobError> {
+        changed(sqlx::query("UPDATE jobs SET status='succeeded',step='completed',completed_at=?,result_id=?,error=NULL WHERE id=? AND attempt_count=? AND status='running' AND kind=?")
+            .bind(now()).bind(result.id()).bind(id).bind(attempt).bind(result.kind().as_str()).execute(&self.pool).await.map_err(failure)?.rows_affected())
     }
 
     pub async fn fail(&self, id: i64, attempt: i64, error: ExecutionError) -> Result<(), JobError> {

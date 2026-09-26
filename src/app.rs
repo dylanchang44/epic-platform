@@ -2,7 +2,7 @@ use leptos::prelude::*;
 use leptos_meta::{MetaTags, Stylesheet, Title, provide_meta_context};
 use leptos_router::{components::*, path};
 
-use crate::pages::{PortfolioPage, ResearchPage, ReviewPage};
+use crate::pages::{PortfolioPage, ResearchPage, ReviewPage, WatchlistPage};
 
 /// The document wrapper runs on the server; App is shared with the browser.
 pub fn shell(options: LeptosOptions) -> impl IntoView {
@@ -41,15 +41,17 @@ pub fn App() -> impl IntoView {
                     <A href="/portfolio">"Portfolio"</A>
                     <A href="/research">"Research"</A>
                     <A href="/review">"Review"</A>
+                    <A href="/watchlist">"Watchlist"</A>
                 </nav>
                 <main id="main">
                     <Routes fallback=NotFound>
                         <Route path=path!("/portfolio") view=PortfolioPage/>
                         <Route path=path!("/research") view=ResearchPage/>
                         <Route path=path!("/review") view=ReviewPage/>
+                        <Route path=path!("/watchlist") view=WatchlistPage/>
                     </Routes>
                 </main>
-                <footer>"Stage 05"<span>"Local holdings · Saved research · Durable review jobs"</span></footer>
+                <footer>"Stage 06"<span>"Local holdings · Saved research · Reviews & watchlist briefings"</span></footer>
             </div>
         </Router>
     }

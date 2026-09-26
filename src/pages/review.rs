@@ -14,43 +14,9 @@ struct ReviewPageData {
     job_error: Option<String>,
 }
 
+use super::job_panel::JobPanel;
 #[cfg(all(feature = "hydrate", not(feature = "ssr")))]
-async fn request<T: serde::de::DeserializeOwned>(path: &str, post: bool) -> Result<T, String> {
-    request_with_key(path, post, None).await
-}
-#[cfg(all(feature = "hydrate", not(feature = "ssr")))]
-async fn request_with_key<T: serde::de::DeserializeOwned>(
-    path: &str,
-    post: bool,
-    key: Option<&str>,
-) -> Result<T, String> {
-    let mut request = if post {
-        gloo_net::http::Request::post(path)
-    } else {
-        gloo_net::http::Request::get(path)
-    };
-    if let Some(key) = key {
-        request = request.header("Idempotency-Key", key);
-    }
-    let response = request.send().await.map_err(|_| "Cannot reach EPIC. Saved jobs continue on the server; check recent jobs or repeat the submission with the same key.".to_string())?;
-    if !response.ok() {
-        return Err(response
-            .json::<ErrorMessage>()
-            .await
-            .map(|e| e.message)
-            .unwrap_or_else(|_| format!("Review request failed (HTTP {})", response.status())));
-    }
-    response
-        .json()
-        .await
-        .map_err(|_| "EPIC returned an unexpected review response.".into())
-}
-
-#[cfg(all(feature = "hydrate", not(feature = "ssr")))]
-#[derive(Deserialize)]
-struct ErrorMessage {
-    message: String,
-}
+use super::job_panel::request;
 
 async fn initial_page() -> Result<ReviewPageData, String> {
     #[cfg(feature = "ssr")]
@@ -62,7 +28,11 @@ async fn initial_page() -> Result<ReviewPageData, String> {
         let portfolio_available = portfolio.snapshot().await.portfolio.is_some();
         let jobs = use_context::<std::sync::Arc<crate::jobs::service::JobService>>()
             .ok_or("Job state unavailable")?;
-        let jobs = jobs.recent().await.map_err(|e| e.to_string());
+        let jobs = match jobs.repository() {
+            Ok(repo) => repo.recent_kind(Some(JobKind::PortfolioReview)).await,
+            Err(error) => Err(error),
+        }
+        .map_err(|e| e.to_string());
         let history = review.history().await.map_err(|e| e.to_string())?;
         let latest = match history.first() {
             Some(entry) => Some(review.detail(entry.id).await.map_err(|e| e.to_string())?),
@@ -89,7 +59,7 @@ async fn initial_page() -> Result<ReviewPageData, String> {
                 request::<crate::portfolio::PortfolioSnapshot>("/api/portfolio", false)
                     .await
                     .is_ok_and(|p| p.portfolio.is_some());
-            let jobs = request::<Vec<Job>>("/api/jobs", false).await;
+            let jobs = request::<Vec<Job>>("/api/jobs?kind=portfolio_review", false).await;
             Ok(ReviewPageData {
                 history,
                 latest,
@@ -103,18 +73,6 @@ async fn initial_page() -> Result<ReviewPageData, String> {
     #[cfg(not(any(feature = "ssr", feature = "hydrate")))]
     {
         Err("Review requires a server or browser build".into())
-    }
-}
-
-async fn create_review(key: String) -> Result<JobSubmission, String> {
-    #[cfg(all(feature = "hydrate", not(feature = "ssr")))]
-    {
-        request_with_key("/api/reviews", true, Some(&key)).await
-    }
-    #[cfg(not(all(feature = "hydrate", not(feature = "ssr"))))]
-    {
-        let _ = key;
-        Err("Enable JavaScript to create a review".into())
     }
 }
 
@@ -168,7 +126,23 @@ fn ReviewWorkbench(data: ReviewPageData) -> impl IntoView {
     let message = RwSignal::new(None::<String>);
     view! {
         {(!data.portfolio_available).then(|| view! { <p>"Load local Schwab data on "<a href="/portfolio">"Portfolio"</a>" before creating a review. Existing saved reviews remain available."</p> })}
-        <ReviewJobs initial=data.jobs initial_error=data.job_error history selected/>
+        <JobPanel initial=data.jobs initial_error=data.job_error kind=JobKind::PortfolioReview on_result=Callback::new(move |result| {
+            if let JobResult::Review { id } = result {
+                leptos::task::spawn_local(async move {
+                    match open_review(id).await {
+                        Ok(detail) => {
+                            history.try_update(|rows| {
+                                rows.retain(|r| r.id != id);
+                                rows.push(ReviewHistoryEntry { id, created_at:detail.review.document.created_at.clone(), summary:detail.review.document.summary.clone() });
+                                rows.sort_by_key(|r| std::cmp::Reverse(r.id));
+                            });
+                            selected.try_set(Some(detail));
+                        },
+                        Err(e) => { error.try_set(Some(e)); }
+                    }
+                });
+            }
+        })/>
         <p role="status" aria-live="polite">{move || message.get()}</p>
         <p role="alert">{move || error.get()}</p>
         <p>"Latest saved review: "{move || history.get().first().map(|e| e.created_at.clone()).unwrap_or_else(|| "None yet".into())}</p>
@@ -190,205 +164,6 @@ fn ReviewWorkbench(data: ReviewPageData) -> impl IntoView {
             }).collect_view()}</ul>
         </section>
         {move || selected.get().map(|detail| view! { <ReviewContent detail/> })}
-    }.into_any()
-}
-
-async fn read_job(id: i64) -> Result<Job, String> {
-    #[cfg(all(feature = "hydrate", not(feature = "ssr")))]
-    {
-        request(&format!("/api/jobs/{id}"), false).await
-    }
-    #[cfg(not(all(feature = "hydrate", not(feature = "ssr"))))]
-    {
-        let _ = id;
-        Err("Enable JavaScript to check jobs".into())
-    }
-}
-async fn retry_job(id: i64) -> Result<JobSubmission, String> {
-    #[cfg(all(feature = "hydrate", not(feature = "ssr")))]
-    {
-        request(&format!("/api/jobs/{id}/retry"), true).await
-    }
-    #[cfg(not(all(feature = "hydrate", not(feature = "ssr"))))]
-    {
-        let _ = id;
-        Err("Enable JavaScript to retry jobs".into())
-    }
-}
-fn remember_job(jobs: RwSignal<Vec<Job>>, job: Job) {
-    jobs.try_update(|rows| {
-        rows.retain(|r| r.id != job.id);
-        rows.push(job);
-        rows.sort_by_key(|r| std::cmp::Reverse(r.id));
-    });
-}
-async fn show_result(
-    job: &Job,
-    history: RwSignal<Vec<ReviewHistoryEntry>>,
-    selected: RwSignal<Option<ReviewDetail>>,
-) -> Result<(), String> {
-    if let Some(JobResult::Review { id }) = job.result {
-        let detail = open_review(id).await?;
-        history.try_update(|rows| {
-            rows.retain(|r| r.id != id);
-            rows.push(ReviewHistoryEntry {
-                id,
-                created_at: detail.review.document.created_at.clone(),
-                summary: detail.review.document.summary.clone(),
-            });
-            rows.sort_by_key(|r| std::cmp::Reverse(r.id));
-        });
-        selected.try_set(Some(detail));
-    }
-    Ok(())
-}
-
-#[component]
-fn ReviewJobs(
-    initial: Vec<Job>,
-    initial_error: Option<String>,
-    history: RwSignal<Vec<ReviewHistoryEntry>>,
-    selected: RwSignal<Option<ReviewDetail>>,
-) -> impl IntoView {
-    let jobs = RwSignal::new(initial);
-    let busy = RwSignal::new(false);
-    let error = RwSignal::new(initial_error);
-    let message = RwSignal::new(None::<String>);
-    let submission_key = RwSignal::new(None::<String>);
-    #[cfg(all(feature = "hydrate", not(feature = "ssr")))]
-    {
-        let polling = RwSignal::new(false);
-        Effect::new(move |_| {
-            if polling.get() || !jobs.get().iter().any(|job| job.status.is_active()) {
-                return;
-            }
-            polling.set(true);
-            leptos::task::spawn_local(async move {
-                loop {
-                    let Some(rows) = jobs.try_get_untracked() else {
-                        return;
-                    };
-                    let active: Vec<_> = rows
-                        .into_iter()
-                        .filter(|job| job.status.is_active())
-                        .collect();
-                    if active.is_empty() {
-                        polling.try_set(false);
-                        break;
-                    }
-                    for old in active {
-                        match read_job(old.id).await {
-                            Ok(job) => {
-                                error.try_set(None);
-                                if let Err(e) = show_result(&job, history, selected).await {
-                                    error.try_set(Some(e));
-                                }
-                                remember_job(jobs, job);
-                            }
-                            Err(e) => {
-                                error.try_set(Some(e));
-                            }
-                        }
-                        if jobs.try_get_untracked().is_none() {
-                            return;
-                        }
-                    }
-                    gloo_timers::future::TimeoutFuture::new(2000).await;
-                }
-            });
-        });
-    }
-    let create = move |_| {
-        if busy.get_untracked() {
-            return;
-        }
-        busy.set(true);
-        error.set(None);
-        let key = submission_key.get_untracked().unwrap_or_else(|| {
-            #[cfg(all(feature = "hydrate", not(feature = "ssr")))]
-            {
-                uuid::Uuid::new_v4().to_string()
-            }
-            #[cfg(not(all(feature = "hydrate", not(feature = "ssr"))))]
-            {
-                String::new()
-            }
-        });
-        submission_key.set(Some(key.clone()));
-        leptos::task::spawn_local(async move {
-            match create_review(key).await {
-                Ok(submitted) => {
-                    submission_key.try_set(None);
-                    message.try_set(Some(format!(
-                        "Job #{} accepted. You can close this page and return later.",
-                        submitted.job_id
-                    )));
-                    match read_job(submitted.job_id).await {
-                        Ok(job) => {
-                            if let Err(e) = show_result(&job, history, selected).await {
-                                error.try_set(Some(e));
-                            }
-                            remember_job(jobs, job);
-                        }
-                        Err(e) => {
-                            error.try_set(Some(format!(
-                                "Job #{} was accepted. Reload the page to recover status. {e}",
-                                submitted.job_id
-                            )));
-                        }
-                    }
-                }
-                Err(e) => {
-                    error.try_set(Some(e));
-                }
-            }
-            busy.try_set(false);
-        });
-    };
-    view! {
-        <button id="create-review" type="button" on:click=create disabled=move || busy.get()>
-            {move || if busy.get() { "Submitting…" } else if submission_key.get().is_some() { "Retry submission with same key" } else { "Create portfolio review" }}
-        </button>
-        <p class="panel-note">"The review captures the portfolio and saved research when its job runs. A manual retry captures then-current inputs if no review was saved."</p>
-        <p role="status" aria-live="polite">{move || message.get()}</p>
-        <p role="alert">{move || error.get()}</p>
-        <section class="panel"><h2>"Recent review jobs"</h2>
-            <p>"Up to 30 recent jobs are restored when you reopen this page. Active jobs update every two seconds."</p>
-            <Show when=move || jobs.get().is_empty()><p>"No jobs yet."</p></Show>
-            <ul class="review-history">{move || jobs.get().into_iter().map(|job| {
-                let id = job.id;
-                let can_retry = job.status.can_retry();
-                let result_id = job.result.as_ref().map(|JobResult::Review { id }| *id);
-                let retry = move |_| {
-                    busy.set(true); error.set(None);
-                    leptos::task::spawn_local(async move {
-                        match retry_job(id).await {
-                            Ok(_) => match read_job(id).await {
-                                Ok(job) => {
-                                    if let Err(e) = show_result(&job, history, selected).await { error.try_set(Some(e)); }
-                                    remember_job(jobs, job);
-                                },
-                                Err(e) => { error.try_set(Some(e)); }
-                            },
-                            Err(e) => { error.try_set(Some(e)); }
-                        }
-                        busy.try_set(false);
-                    });
-                };
-                view! { <li data-job-id=id>
-                    <p><strong>{format!("Job #{id} · {:?} · attempt {}", job.status, job.attempt_count)}</strong>" · "{job.step.as_str()}</p>
-                    <p>{format!("Queued: {} · Started: {} · Completed: {}", job.queued_at, job.started_at.clone().unwrap_or_else(|| "—".into()), job.completed_at.clone().unwrap_or_else(|| "—".into()))}</p>
-                    {job.error.map(|e| view! { <p role="alert">{e}</p> })}
-                    {(!job.previous_failures.is_empty()).then(|| view! { <details><summary>"Previous failures / interruptions"</summary><ul>{job.previous_failures.into_iter().map(|f| view! { <li>{format!("Attempt {} · {:?} · {} · {}: {}", f.attempt, f.status, f.step.as_str(), f.completed_at, f.error)}</li> }).collect_view()}</ul></details> })}
-                    {can_retry.then(|| view! { <button type="button" on:click=retry disabled=move || busy.get()>"Retry job"</button> })}
-                    {result_id.map(|review_id| view! { <button type="button" disabled=move || busy.get() on:click=move |_| {
-                        leptos::task::spawn_local(async move {
-                            match open_review(review_id).await { Ok(detail) => { selected.try_set(Some(detail)); }, Err(e) => { error.try_set(Some(e)); } }
-                        });
-                    }>{format!("Open review #{review_id}")}</button> })}
-                </li> }
-            }).collect_view()}</ul>
-        </section>
     }.into_any()
 }
 

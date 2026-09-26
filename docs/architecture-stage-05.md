@@ -1,5 +1,11 @@
 # Stage 05 — durable portfolio review jobs
 
+This document records Stage 5. [Stage 6](architecture-stage-06.md) adds Watchlist
+Briefing (not the research-refresh workflow suggested below) to the same runner.
+Migration 3 scopes idempotency by kind and normalized input, adds durable inputs
+and typed briefing results, and preserves existing Review jobs. Polling now lives
+in shared `pages/job_panel.rs`; job logs use `result_id` for both workflows.
+
 ## Purpose and scope
 
 Move review execution out of the originating HTTP request while keeping one

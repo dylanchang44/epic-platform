@@ -45,22 +45,18 @@ impl Drop for WorkerPermit {
 pub async fn reconcile(jobs: &JobService, review: &ReviewService) -> Result<(), JobError> {
     let repository = jobs.repository()?;
     for job in repository.running().await? {
-        match review
-            .by_origin_job(job.id)
-            .await
-            .map_err(|_| JobError::Repository)?
-        {
+        match saved_result(jobs, review, &job).await? {
             Some(saved) => {
                 repository
-                    .succeed(job.id, job.attempt_count, saved.id)
+                    .succeed_result(job.id, job.attempt_count, saved.clone())
                     .await?;
                 tracing::info!(
                     job_id = job.id,
-                    job_kind = "portfolio_review",
+                    job_kind = job.kind.as_str(),
                     attempt = job.attempt_count,
                     state = "succeeded",
-                    result_review_id = saved.id,
-                    "recovered committed review"
+                    result_id = saved.id(),
+                    "recovered committed result"
                 );
             }
             None => {
@@ -69,7 +65,7 @@ pub async fn reconcile(jobs: &JobService, review: &ReviewService) -> Result<(), 
                     .await?;
                 tracing::warn!(
                     job_id = job.id,
-                    job_kind = "portfolio_review",
+                    job_kind = job.kind.as_str(),
                     attempt = job.attempt_count,
                     state = "interrupted",
                     "recovered abandoned execution"
@@ -140,7 +136,7 @@ pub async fn start(
                 _ = tokio::time::sleep(Duration::from_secs(5)) => {},
             }
         }
-        tracing::info!("review worker stopped");
+        tracing::info!("job worker stopped");
     });
     Ok(Worker { stop, task })
 }
@@ -158,7 +154,7 @@ pub async fn run_one(
     let span = tracing::info_span!(
         "job",
         job_id = job.id,
-        job_kind = "portfolio_review",
+        job_kind = job.kind.as_str(),
         attempt = job.attempt_count
     );
     async move {
@@ -166,6 +162,7 @@ pub async fn run_one(
         tracing::info!(state="running", step=job.step.as_str(), "job claimed");
         let task_jobs = jobs.clone();
         let task_review = review.clone();
+        let task_input = job.input.clone();
         let mut tasks = JoinSet::new();
         tasks.spawn(async move {
             match job.kind {
@@ -182,23 +179,40 @@ pub async fn run_one(
                         tracing::info!(state="running", step=step.as_str(), "job progress");
                         Ok(())
                     }
-                }).await,
+                }).await.map(|saved| JobResult::Review { id:saved.id }).map_err(ExecutionError::Review),
+                JobKind::WatchlistBriefing => {
+                    let JobInput::WatchlistBriefing { symbols } = task_input else { unreachable!("repository validates kind and input") };
+                    task_jobs.watchlist().create_for_job(&research,symbols,job.id,|step| {
+                        let jobs = task_jobs.clone();
+                        async move {
+                            use crate::watchlist::{domain::WatchlistError,service::BriefingStep};
+                            let step = match step {
+                                BriefingStep::ReadingWatchlist => JobStep::ReadingWatchlist,
+                                BriefingStep::LoadingResearch => JobStep::LoadingResearch,
+                                BriefingStep::PersistingBriefing => JobStep::PersistingBriefing,
+                            };
+                            jobs.repository().map_err(|_| WatchlistError::Repository)?.progress(job.id,job.attempt_count,step).await.map_err(|_| WatchlistError::Repository)?;
+                            tracing::info!(state="running",step=step.as_str(),"job progress");
+                            Ok(())
+                        }
+                    }).await.map(|saved| JobResult::WatchlistBriefing { id:saved.id }).map_err(ExecutionError::Watchlist)
+                },
             }
         }.in_current_span());
         let result = tasks.join_next().await.expect("one execution task");
         match result {
             Ok(Ok(saved)) => {
-                jobs.repository()?.succeed(job.id, job.attempt_count, saved.id).await?;
-                tracing::info!(state="succeeded", elapsed_ms=elapsed.elapsed().as_millis() as u64, result_review_id=saved.id, "job completed");
+                jobs.repository()?.succeed_result(job.id, job.attempt_count, saved.clone()).await?;
+                tracing::info!(state="succeeded", elapsed_ms=elapsed.elapsed().as_millis() as u64, result_id=saved.id(), "job completed");
             }
             failure => {
                 // A failed/ambiguous COMMIT acknowledgement must not hide a
-                // committed result or encourage a second review on manual retry.
-                if let Some(saved) = review.by_origin_job(job.id).await.map_err(|_| JobError::Repository)? {
-                    jobs.repository()?.succeed(job.id, job.attempt_count, saved.id).await?;
-                    tracing::info!(state="succeeded", elapsed_ms=elapsed.elapsed().as_millis() as u64, result_review_id=saved.id, "reconciled execution result");
+                // committed result or encourage a duplicate on manual retry.
+                if let Some(saved) = saved_result(&jobs,&review,&job).await? {
+                    jobs.repository()?.succeed_result(job.id, job.attempt_count, saved.clone()).await?;
+                    tracing::info!(state="succeeded", elapsed_ms=elapsed.elapsed().as_millis() as u64, result_id=saved.id(), "reconciled execution result");
                 } else {
-                    let error = match failure { Ok(Err(error)) => ExecutionError::Review(error), _ => ExecutionError::Panicked };
+                    let error = match failure { Ok(Err(error)) => error, _ => ExecutionError::Panicked };
                     jobs.repository()?.fail(job.id, job.attempt_count, error.clone()).await?;
                     tracing::warn!(state="failed", elapsed_ms=elapsed.elapsed().as_millis() as u64, %error, "job failed");
                 }
@@ -206,4 +220,27 @@ pub async fn run_one(
         }
         Ok(true)
     }.instrument(span).await
+}
+
+/// The same lookup protects both restart recovery and ambiguous commit errors.
+async fn saved_result(
+    jobs: &JobService,
+    review: &ReviewService,
+    job: &Job,
+) -> Result<Option<JobResult>, JobError> {
+    match job.kind {
+        JobKind::PortfolioReview => review
+            .by_origin_job(job.id)
+            .await
+            .map(|saved| saved.map(|s| JobResult::Review { id: s.id }))
+            .map_err(|_| JobError::Repository),
+        JobKind::WatchlistBriefing => jobs
+            .watchlist()
+            .repository()
+            .map_err(|_| JobError::Repository)?
+            .by_origin_job(job.id)
+            .await
+            .map(|saved| saved.map(|s| JobResult::WatchlistBriefing { id: s.id }))
+            .map_err(|_| JobError::Repository),
+    }
 }

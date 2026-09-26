@@ -27,12 +27,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(error) = review.initialization_error() {
         eprintln!("Review unavailable: {error}");
     }
+    let jobs =
+        epic_platform::jobs::service::JobService::with_watchlist(&review, config.watchlist.clone());
     let portfolio = PortfolioState::new(config);
     let initial = portfolio.reload().await;
     if let Some(error) = initial.error {
         eprintln!("Portfolio unavailable: {}", error.message);
     }
-    let jobs = epic_platform::jobs::service::JobService::new(&review);
     // Bind before starting a worker: a second process on this address must not
     // reconcile the live process's running job.
     let listener = tokio::net::TcpListener::bind(address).await?;
@@ -46,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         Ok(worker) => Some(worker),
         Err(error) => {
-            tracing::error!(%error, "review worker unavailable");
+            tracing::error!(%error, "job worker unavailable");
             None
         }
     };

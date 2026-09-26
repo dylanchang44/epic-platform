@@ -1,7 +1,7 @@
 //! Native-only HTTP boundary for portfolio commands, snapshots and rendered pages.
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header},
     routing::{get, post},
 };
@@ -35,6 +35,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/portfolio/reload", post(reload_portfolio))
         .route("/api/reviews", get(list_reviews).post(create_review))
         .route("/api/reviews/{id}", get(get_review))
+        .route("/api/watchlist", get(watchlist_configuration))
+        .route(
+            "/api/watchlist/briefings",
+            get(list_briefings).post(create_briefing),
+        )
+        .route("/api/watchlist/briefings/{id}", get(get_briefing))
         .route("/api/research/holdings", get(get_research_holdings))
         .route(
             "/api/research/companies/{symbol}",
@@ -127,6 +133,7 @@ fn job_error(error: crate::jobs::domain::JobError) -> JobHttpError {
         JobError::InvalidTransition | JobError::NoPortfolio => StatusCode::CONFLICT,
         JobError::InvalidPortfolio => StatusCode::UNPROCESSABLE_ENTITY,
         JobError::Repository | JobError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+        JobError::Watchlist { .. } => StatusCode::UNPROCESSABLE_ENTITY,
     };
     let message = error.to_string();
     (status, Json(JobApiError { error, message }))
@@ -139,8 +146,95 @@ fn job_id(id: String) -> Result<i64, JobHttpError> {
 }
 async fn list_jobs(
     State(state): State<AppState>,
+    Query(query): Query<JobQuery>,
 ) -> Result<Json<Vec<crate::jobs::domain::Job>>, JobHttpError> {
-    state.jobs.recent().await.map(Json).map_err(job_error)
+    state
+        .jobs
+        .repository()
+        .map_err(job_error)?
+        .recent_kind(query.kind)
+        .await
+        .map(Json)
+        .map_err(job_error)
+}
+#[derive(serde::Deserialize)]
+struct JobQuery {
+    kind: Option<crate::jobs::domain::JobKind>,
+}
+
+async fn watchlist_configuration(
+    State(state): State<AppState>,
+) -> Json<crate::watchlist::domain::WatchlistConfiguration> {
+    Json(state.jobs.watchlist().configuration())
+}
+async fn create_briefing(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<
+    (
+        StatusCode,
+        [(header::HeaderName, String); 1],
+        Json<crate::jobs::domain::JobSubmission>,
+    ),
+    JobHttpError,
+> {
+    let key = headers
+        .get("Idempotency-Key")
+        .map(|v| v.to_str())
+        .transpose()
+        .map_err(|_| job_error(crate::jobs::domain::JobError::InvalidKey))?;
+    let job = state.jobs.submit_briefing(key).await.map_err(job_error)?;
+    Ok((
+        StatusCode::ACCEPTED,
+        [(header::LOCATION, job.status_url.clone())],
+        Json(job),
+    ))
+}
+type BriefingHttpError = (StatusCode, Json<serde_json::Value>);
+fn briefing_error(error: crate::watchlist::domain::WatchlistError) -> BriefingHttpError {
+    use crate::watchlist::domain::WatchlistError;
+    let status = match error {
+        WatchlistError::NotFound => StatusCode::NOT_FOUND,
+        WatchlistError::InvalidId => StatusCode::BAD_REQUEST,
+        WatchlistError::Empty | WatchlistError::InvalidConfiguration => {
+            StatusCode::UNPROCESSABLE_ENTITY
+        }
+        _ => StatusCode::SERVICE_UNAVAILABLE,
+    };
+    (
+        status,
+        Json(serde_json::json!({"message":error.to_string(),"error":error})),
+    )
+}
+async fn list_briefings(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<crate::watchlist::domain::BriefingHistoryEntry>>, BriefingHttpError> {
+    state
+        .jobs
+        .watchlist()
+        .repository()
+        .map_err(briefing_error)?
+        .history()
+        .await
+        .map(Json)
+        .map_err(briefing_error)
+}
+async fn get_briefing(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::watchlist::domain::SavedBriefing>, BriefingHttpError> {
+    let id = id
+        .parse::<i64>()
+        .map_err(|_| briefing_error(crate::watchlist::domain::WatchlistError::InvalidId))?;
+    state
+        .jobs
+        .watchlist()
+        .repository()
+        .map_err(briefing_error)?
+        .get(id)
+        .await
+        .map(Json)
+        .map_err(briefing_error)
 }
 async fn get_job(
     State(state): State<AppState>,
