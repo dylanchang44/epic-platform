@@ -186,14 +186,17 @@ async fn api(directory: PathBuf) -> axum::Router {
         &research_dir.path().join("research.db"),
     )
     .await;
+    let review = epic_platform::review::service::ReviewService::open(
+        &research_dir.path().join("reviews.db"),
+    )
+    .await;
+    let jobs = epic_platform::jobs::service::JobService::new(&review);
     epic_platform::server::router(AppState {
         leptos_options: options,
         portfolio,
         research,
-        review: epic_platform::review::service::ReviewService::open(
-            &research_dir.path().join("reviews.db"),
-        )
-        .await,
+        review,
+        jobs,
     })
 }
 

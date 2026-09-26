@@ -1,5 +1,12 @@
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .json()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "epic_platform=info".into()),
+        )
+        .init();
     use epic_platform::server;
     use epic_platform::{
         config::AppConfig,
@@ -25,16 +32,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(error) = initial.error {
         eprintln!("Portfolio unavailable: {}", error.message);
     }
+    let jobs = epic_platform::jobs::service::JobService::new(&review);
+    // Bind before starting a worker: a second process on this address must not
+    // reconcile the live process's running job.
+    let listener = tokio::net::TcpListener::bind(address).await?;
+    let worker = match epic_platform::jobs::runner::start(
+        jobs.clone(),
+        portfolio.clone(),
+        research.clone(),
+        review.clone(),
+    )
+    .await
+    {
+        Ok(worker) => Some(worker),
+        Err(error) => {
+            tracing::error!(%error, "review worker unavailable");
+            None
+        }
+    };
     let state = AppState {
         leptos_options: options,
         portfolio,
         research,
         review,
+        jobs,
     };
-    let listener = tokio::net::TcpListener::bind(address).await?;
     println!("EPIC Platform: http://{address}");
     axum::serve(listener, server::router(state))
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            if let Some(worker) = worker {
+                worker.shutdown().await;
+            }
+        })
         .await?;
     Ok(())
 }

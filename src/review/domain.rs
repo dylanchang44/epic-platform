@@ -6,6 +6,15 @@ use crate::{
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
+/// Review reports its real execution boundaries without depending on Jobs.
+#[derive(Clone, Copy)]
+pub enum ReviewStep {
+    SnapshottingPortfolio,
+    LoadingResearch,
+    CalculatingReview,
+    PersistingReview,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CoverageStatus {

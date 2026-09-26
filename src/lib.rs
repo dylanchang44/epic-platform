@@ -1,5 +1,6 @@
 //! UI shared by the native server and the browser's WebAssembly build.
 pub mod app;
+pub mod jobs;
 mod pages;
 pub mod portfolio;
 pub mod research;

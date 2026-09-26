@@ -1,5 +1,11 @@
 # Stage 04 — immutable portfolio reviews
 
+This document records the synchronous Stage 4 baseline. [Stage 5](architecture-stage-05.md)
+changes creation to a durable job returning HTTP 202. Saved-review reads,
+calculations and immutability remain as described here. The existing Review
+database also holds Job-owned execution tables, with a shared migration ledger.
+Stage 5 implements review jobs, superseding the research-refresh suggestion below.
+
 ## Purpose
 
 Complete the first product loop: loaded holdings + saved research -> deterministic

@@ -36,6 +36,10 @@ send_wrapper = { version = "0.6", features = ["futures"], optional = true }
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls"], optional = true }
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"], optional = true }
 serde_json = { version = "1", optional = true }
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"], optional = true }
+gloo-timers = { version = "0.3", features = ["futures"], optional = true }
+uuid = { version = "1", features = ["v4", "js"], optional = true }
 
 [dev-dependencies]
 tempfile = "3"
@@ -44,8 +48,8 @@ serde_json = "1"
 
 [features]
 default = []
-ssr = ["dep:axum", "dep:leptos_axum", "dep:tokio", "dep:csv", "dep:chrono", "dep:reqwest", "dep:sqlx", "dep:serde_json", "leptos/ssr", "leptos_meta/ssr", "leptos_router/ssr"]
-hydrate = ["leptos/hydrate", "dep:wasm-bindgen", "dep:console_error_panic_hook", "dep:gloo-net", "dep:send_wrapper"]
+ssr = ["dep:tracing", "dep:tracing-subscriber", "dep:axum", "dep:leptos_axum", "dep:tokio", "dep:csv", "dep:chrono", "dep:reqwest", "dep:sqlx", "dep:serde_json", "leptos/ssr", "leptos_meta/ssr", "leptos_router/ssr"]
+hydrate = ["dep:uuid", "dep:gloo-timers", "leptos/hydrate", "dep:wasm-bindgen", "dep:console_error_panic_hook", "dep:gloo-net", "dep:send_wrapper"]
 
 [profile.wasm-release]
 inherits = "release"

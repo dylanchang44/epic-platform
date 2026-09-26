@@ -12,6 +12,22 @@ pub struct ReviewRepository {
 }
 
 impl ReviewRepository {
+    /// Jobs shares this execution database, but owns its own repository/tables.
+    pub fn execution_pool(&self) -> SqlitePool {
+        self.pool.clone()
+    }
+
+    pub async fn by_origin_job(&self, job_id: i64) -> Result<Option<SavedReview>, ReviewError> {
+        let id: Option<i64> = sqlx::query_scalar("SELECT id FROM reviews WHERE origin_job_id=?")
+            .bind(job_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(failure)?;
+        match id {
+            Some(id) => self.get(id).await.map(Some),
+            None => Ok(None),
+        }
+    }
     pub async fn open(path: &Path) -> Result<Self, ReviewError> {
         if path.as_os_str().is_empty() {
             return Err(ReviewError::Initialization);
@@ -45,22 +61,36 @@ impl ReviewRepository {
     }
 
     pub async fn save(&self, document: ReviewDocument) -> Result<SavedReview, ReviewError> {
+        self.save_for_job(document, None).await
+    }
+
+    pub async fn save_for_job(
+        &self,
+        document: ReviewDocument,
+        job_id: Option<i64>,
+    ) -> Result<SavedReview, ReviewError> {
         let json = serde_json::to_string(&document).map_err(failure)?;
         let summary = serde_json::to_string(&document.summary).map_err(failure)?;
         // All input reads/calculations precede BEGIN. One row is one complete review.
         let mut transaction = self.pool.begin().await.map_err(failure)?;
-        let id = sqlx::query(
-            "INSERT INTO reviews(created_at, summary_json, document_json) VALUES (?, ?, ?)",
+        let id: Option<i64> = sqlx::query_scalar(
+            "INSERT INTO reviews(created_at, summary_json, document_json, origin_job_id) VALUES (?, ?, ?, ?) ON CONFLICT(origin_job_id) DO NOTHING RETURNING id",
         )
         .bind(&document.created_at)
         .bind(summary)
         .bind(json)
-        .execute(&mut *transaction)
+        .bind(job_id)
+        .fetch_optional(&mut *transaction)
         .await
-        .map_err(failure)?
-        .last_insert_rowid();
+        .map_err(failure)?;
         transaction.commit().await.map_err(failure)?;
-        Ok(SavedReview { id, document })
+        match id {
+            Some(id) => Ok(SavedReview { id, document }),
+            None => self
+                .by_origin_job(job_id.ok_or(ReviewError::Repository)?)
+                .await?
+                .ok_or(ReviewError::Repository),
+        }
     }
 
     pub async fn get(&self, id: i64) -> Result<SavedReview, ReviewError> {

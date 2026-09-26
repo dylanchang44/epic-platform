@@ -2,7 +2,7 @@
 use axum::{
     Json, Router,
     extract::{Path, State},
-    http::{StatusCode, header},
+    http::{HeaderMap, StatusCode, header},
     routing::{get, post},
 };
 use leptos::prelude::*;
@@ -20,12 +20,17 @@ pub fn router(state: AppState) -> Router {
     let context = state.portfolio.clone();
     let research_context = state.research.clone();
     let review_context = state.review.clone();
+    let jobs_context = state.jobs.clone();
     Router::new()
         .route(
             "/",
             get(|| async { axum::response::Redirect::temporary("/portfolio") }),
         )
         .route("/health", get(|| async { "ok\n" }))
+        .route("/ready", get(readiness))
+        .route("/api/jobs", get(list_jobs))
+        .route("/api/jobs/{id}", get(get_job))
+        .route("/api/jobs/{id}/retry", post(retry_job))
         .route("/api/portfolio", get(get_portfolio))
         .route("/api/portfolio/reload", post(reload_portfolio))
         .route("/api/reviews", get(list_reviews).post(create_review))
@@ -46,6 +51,7 @@ pub fn router(state: AppState) -> Router {
                 provide_context(context.clone());
                 provide_context(research_context.clone());
                 provide_context(review_context.clone());
+                provide_context(jobs_context.clone());
             },
             {
                 let options = options.clone();
@@ -86,24 +92,106 @@ fn review_error(error: crate::review::domain::ReviewError) -> ReviewHttpError {
 
 async fn create_review(
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> Result<
     (
         StatusCode,
         [(header::HeaderName, String); 1],
-        Json<crate::review::domain::SavedReview>,
+        Json<crate::jobs::domain::JobSubmission>,
     ),
-    ReviewHttpError,
+    JobHttpError,
 > {
-    let review = state
-        .review
-        .create_portfolio_review(&state.portfolio, &state.research)
+    let key = headers
+        .get("Idempotency-Key")
+        .map(|v| v.to_str())
+        .transpose()
+        .map_err(|_| job_error(crate::jobs::domain::JobError::InvalidKey))?;
+    let job = state
+        .jobs
+        .submit(&state.portfolio, key)
         .await
-        .map_err(review_error)?;
+        .map_err(job_error)?;
     Ok((
-        StatusCode::CREATED,
-        [(header::LOCATION, format!("/api/reviews/{}", review.id))],
-        Json(review),
+        StatusCode::ACCEPTED,
+        [(header::LOCATION, job.status_url.clone())],
+        Json(job),
     ))
+}
+
+type JobHttpError = (StatusCode, Json<crate::jobs::domain::JobApiError>);
+fn job_error(error: crate::jobs::domain::JobError) -> JobHttpError {
+    use crate::jobs::domain::*;
+    let status = match error {
+        JobError::NotFound => StatusCode::NOT_FOUND,
+        JobError::InvalidId | JobError::InvalidKey => StatusCode::BAD_REQUEST,
+        JobError::InvalidTransition | JobError::NoPortfolio => StatusCode::CONFLICT,
+        JobError::InvalidPortfolio => StatusCode::UNPROCESSABLE_ENTITY,
+        JobError::Repository | JobError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+    };
+    let message = error.to_string();
+    (status, Json(JobApiError { error, message }))
+}
+fn job_id(id: String) -> Result<i64, JobHttpError> {
+    id.parse::<i64>()
+        .ok()
+        .filter(|id| *id > 0)
+        .ok_or_else(|| job_error(crate::jobs::domain::JobError::InvalidId))
+}
+async fn list_jobs(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<crate::jobs::domain::Job>>, JobHttpError> {
+    state.jobs.recent().await.map(Json).map_err(job_error)
+}
+async fn get_job(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::jobs::domain::Job>, JobHttpError> {
+    state
+        .jobs
+        .get(job_id(id)?)
+        .await
+        .map(Json)
+        .map_err(job_error)
+}
+async fn retry_job(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<
+    (
+        StatusCode,
+        [(header::HeaderName, String); 1],
+        Json<crate::jobs::domain::JobSubmission>,
+    ),
+    JobHttpError,
+> {
+    let job = state.jobs.retry(job_id(id)?).await.map_err(job_error)?;
+    Ok((
+        StatusCode::ACCEPTED,
+        [(header::LOCATION, job.status_url.clone())],
+        Json(job),
+    ))
+}
+async fn readiness(
+    State(state): State<AppState>,
+) -> (StatusCode, Json<crate::jobs::domain::Readiness>) {
+    let migrations_completed = state.review.initialization_error().is_none()
+        && state.research.initialization_error().is_none();
+    let job_repository_usable = state.jobs.usable().await;
+    let worker_started = state.jobs.worker_started();
+    let ready = migrations_completed && job_repository_usable && worker_started;
+    (
+        if ready {
+            StatusCode::OK
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        },
+        Json(crate::jobs::domain::Readiness {
+            ready,
+            migrations_completed,
+            job_repository_usable,
+            worker_started,
+        }),
+    )
 }
 
 async fn list_reviews(

@@ -87,16 +87,18 @@ async fn portfolio(directory: PathBuf) -> Arc<PortfolioState> {
 }
 async fn app(portfolio: Arc<PortfolioState>, research: Arc<ResearchService>) -> Router {
     let directory = tempdir().unwrap();
+    let review =
+        epic_platform::review::service::ReviewService::open(&directory.path().join("reviews.db"))
+            .await;
+    let jobs = epic_platform::jobs::service::JobService::new(&review);
     epic_platform::server::router(AppState {
         leptos_options: leptos::prelude::get_configuration(Some("Cargo.toml"))
             .unwrap()
             .leptos_options,
         portfolio,
         research,
-        review: epic_platform::review::service::ReviewService::open(
-            &directory.path().join("reviews.db"),
-        )
-        .await,
+        review,
+        jobs,
     })
 }
 async fn call(app: &Router, method: &str, path: &str) -> (StatusCode, serde_json::Value) {

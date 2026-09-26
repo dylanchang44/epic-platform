@@ -91,7 +91,7 @@ impl Harness {
             .await
             .unwrap()
     }
-    fn app(&self) -> axum::Router {
+    fn app(&self, jobs: Arc<epic_platform::jobs::service::JobService>) -> axum::Router {
         epic_platform::server::router(AppState {
             leptos_options: leptos::prelude::get_configuration(Some("Cargo.toml"))
                 .unwrap()
@@ -99,6 +99,7 @@ impl Harness {
             portfolio: self.portfolio.clone(),
             research: self.research.clone(),
             review: self.reviews.clone(),
+            jobs,
         })
     }
 }
@@ -489,12 +490,12 @@ async fn call(app: &axum::Router, method: &str, path: &str) -> (StatusCode, serd
         .unwrap();
     let status = response.status();
     assert_eq!(response.headers()["cache-control"], "no-store");
-    if status == StatusCode::CREATED {
+    if status == StatusCode::ACCEPTED {
         assert!(
             response.headers()["location"]
                 .to_str()
                 .unwrap()
-                .starts_with("/api/reviews/")
+                .starts_with("/api/jobs/")
         );
     }
     let bytes = to_bytes(response.into_body(), 2_000_000).await.unwrap();
@@ -504,14 +505,36 @@ async fn call(app: &axum::Router, method: &str, path: &str) -> (StatusCode, serd
 #[tokio::test]
 async fn review_api_create_history_detail_and_structured_errors() {
     let h = Harness::new().await;
-    let app = h.app();
+    let jobs = epic_platform::jobs::service::JobService::new(&h.reviews);
+    let worker = epic_platform::jobs::runner::start(
+        jobs.clone(),
+        h.portfolio.clone(),
+        h.research.clone(),
+        h.reviews.clone(),
+    )
+    .await
+    .unwrap();
+    let app = h.app(jobs.clone());
     assert_eq!(
         call(&app, "GET", "/api/reviews").await.1,
         serde_json::json!([])
     );
-    let (status, created) = call(&app, "POST", "/api/reviews").await;
-    assert_eq!(status, StatusCode::CREATED);
-    let id = created["id"].as_i64().unwrap();
+    let (status, submitted) = call(&app, "POST", "/api/reviews").await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let job_id = submitted["job_id"].as_i64().unwrap();
+    let id = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(epic_platform::jobs::domain::JobResult::Review { id }) =
+                jobs.get(job_id).await.unwrap().result
+            {
+                break id;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let created = serde_json::to_value(h.reviews.detail(id).await.unwrap().review).unwrap();
     assert_eq!(
         call(&app, "GET", &format!("/api/reviews/{id}")).await.1["review"],
         created
@@ -540,6 +563,7 @@ async fn review_api_create_history_detail_and_structured_errors() {
         portfolio: unloaded,
         research: h.research.clone(),
         review: h.reviews.clone(),
+        jobs,
     });
     let error = call(&app, "POST", "/api/reviews").await;
     assert_eq!(error.0, StatusCode::CONFLICT);
@@ -548,6 +572,7 @@ async fn review_api_create_history_detail_and_structured_errors() {
         call(&app, "GET", &format!("/api/reviews/{id}")).await.0,
         StatusCode::OK
     );
+    worker.shutdown().await;
 }
 
 #[tokio::test]

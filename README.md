@@ -1,15 +1,6 @@
 # EPIC Platform
 
 A local-first personal investment platform, built gradually in Rust on Linux.
-Stage 4 adds saved, immutable portfolio reviews with concentration, research
-coverage and factual comparison against the previous saved review. Stage 3's
-manual company refresh and durable research snapshots remain available.
-This is one workspace, one Linux process, one Axum
-server and one Leptos app. **ConsensX does not need to run.** Its minimal public
-source adapter and snapshot ideas are adapted inside EPIC; no iframe or second
-service is involved. Portfolio holdings still come from local Schwab CSVs and
-remain in memory. A saved review preserves the holding fields and exact research
-snapshots captured during its creation, so it remains readable after changes or restart.
 
 ## Run (Linux / fish)
 
@@ -190,12 +181,14 @@ set -gx LEPTOS_RELOAD_PORT 3101
 cargo leptos watch
 ```
 
-## Saved portfolio reviews (Linux / fish)
+## Durable portfolio review jobs (Linux / fish)
 
-Review owns its own SQLite database, configured by `REVIEW_DB_PATH` (default
+Review and Jobs share the execution SQLite database, configured by `REVIEW_DB_PATH` (default
 `data/reviews.db`, relative to the working directory). Use a different path from
 `RESEARCH_DB_PATH`: their versioned migrations and ownership are independent.
-Existing databases are not moved. Review files contain saved holding values;
+Jobs owns queue/attempt tables; Review owns immutable review records. One migration
+sequence upgrades existing Stage 4 databases in place. Existing databases are not moved.
+Review files contain saved holding values;
 database and WAL/SHM files stay local and are ignored by Git. No raw CSV is stored.
 
 Start the single application process from fish:
@@ -217,19 +210,43 @@ In a second fish terminal (Python 3 is used only to extract the returned ID):
 
 ```fish
 curl --fail http://127.0.0.1:3000/health
+curl --fail-with-body http://127.0.0.1:3000/ready
 curl --fail-with-body -X POST http://127.0.0.1:3000/api/portfolio/reload
 curl --fail-with-body http://127.0.0.1:3000/api/portfolio
 
 # Optional: explicitly refresh research before creating the review.
 curl --fail-with-body -X POST http://127.0.0.1:3000/api/research/companies/NVDA/refresh
 
-# Creating a review uses current memory and saved research; it does not refresh either.
-set review_id (curl --fail-with-body -X POST http://127.0.0.1:3000/api/reviews | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+# One new key per intentional action. Reuse this key if the response is lost.
+set job_key (cat /proc/sys/kernel/random/uuid)
+set job_id (curl --fail-with-body -X POST -H "Idempotency-Key: $job_key" http://127.0.0.1:3000/api/reviews | python3 -c 'import json,sys; print(json.load(sys.stdin)["job_id"])')
+# Repeat the same submission: HTTP 202, same job ID, no second review.
+curl --fail-with-body -i -X POST -H "Idempotency-Key: $job_key" http://127.0.0.1:3000/api/reviews
+curl --fail-with-body "http://127.0.0.1:3000/api/jobs/$job_id"
+curl --fail-with-body http://127.0.0.1:3000/api/jobs
+
+# Poll until a terminal state (also what the page does every two seconds).
+set job_status queued
+while contains -- $job_status queued running
+    sleep 2
+    set job_status (curl --fail-with-body "http://127.0.0.1:3000/api/jobs/$job_id" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])')
+    echo $job_status
+end
+# After succeeded:
+set review_id (curl --fail-with-body "http://127.0.0.1:3000/api/jobs/$job_id" | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["id"])')
 curl --fail-with-body http://127.0.0.1:3000/api/reviews
 curl --fail-with-body "http://127.0.0.1:3000/api/reviews/$review_id"
+
+# Only if the job is failed or interrupted, after fixing its cause:
+curl --fail-with-body -i -X POST "http://127.0.0.1:3000/api/jobs/$job_id/retry"
 ```
 
-Open <http://127.0.0.1:3000/review> to create or select reviews. Missing research
+Open <http://127.0.0.1:3000/review> to submit jobs or select saved reviews. The
+page restores recent jobs after a browser refresh, polls queued/running jobs,
+offers manual retry after failure/interruption, and opens completed reviews.
+Inputs are captured when the worker runs, using current memory and already-saved
+research. A queued job contains no frozen portfolio; a retry without a saved
+result captures then-current inputs. Missing research
 allows zero/partial coverage. Registry-supported equities define coverage;
 unmatched stocks and unsupported instruments are shown separately. Position
 weights use signed value divided by positive net total, while concentration and
@@ -242,6 +259,8 @@ database paths. In the second terminal, repeat the history and saved-ID GETs:
 ```fish
 curl --fail-with-body http://127.0.0.1:3000/api/reviews
 curl --fail-with-body "http://127.0.0.1:3000/api/reviews/$review_id"
+curl --fail-with-body "http://127.0.0.1:3000/api/jobs/$job_id"
+curl --fail-with-body http://127.0.0.1:3000/ready
 ```
 
 The review's positions, source filename/load time, research facts, dates, links
@@ -249,14 +268,49 @@ and ages remain unchanged. Create a second review after manually loading a new
 portfolio or refreshing research; selecting it shows differences from the
 immediately previous saved review. Those differences are not investment returns.
 
-POST returns 201 and a Location header. GET history returns lightweight entries;
+POST now returns **202 Accepted**, `Location: /api/jobs/{id}`, and
+`{job_id,status,status_url}`. `Idempotency-Key` is optional (1–128 ASCII letters,
+digits, `.`, `_`, `-`); its uniqueness lasts for the life of this database.
+Repeating a key returns the existing job, including its current terminal status.
+Use a fresh key for a separate intentional review. The page generates UUIDs and
+retains a submission key on a request error. `GET /api/jobs` returns at most 30
+recent jobs. Retry returns 202 with the same ID; only failed/interrupted jobs
+qualify (409 otherwise). Attempts count executions and increment on claim,
+starting at zero while initially queued. Previous failure details are retained.
+
+GET review history returns lightweight entries;
 GET by ID returns `review`, `comparison`, and `comparison_error`. Errors contain
-`error.kind` and `message`: 409 no loaded portfolio, 422 invalid/empty portfolio,
-400 invalid ID, 404 absent ID, 503 repository/init/migration failure, or 500
-calculation failure. Research-read errors are recorded in a successfully created
+`error.kind` and `message`: 400 invalid review ID, 404 absent review, or 503
+repository/init/migration failure. Comparison errors remain separate from the
+selected saved review. Job errors use the same structured envelope:
+400 invalid ID/key, 404 missing job, 409 no portfolio/invalid retry state, 422 invalid
+portfolio, 503 queue/worker unavailable. Execution failures appear on the job.
+Research-read errors are recorded in a successfully created
 review as unavailable capture, distinct from no saved research. Old reviews need
-only the Review database. If a creation response is lost, inspect history before
-creating another review.
+only the Review database.
+
+Queued jobs survive restart and execute after startup. Abandoned running jobs
+become succeeded if their unique origin review exists, or interrupted otherwise.
+Interrupted jobs wait for deliberate retry; there is no automatic retry. The
+unique job-to-review link prevents duplicates if a process stops after saving a
+review but before recording success. A graceful Ctrl+C/SIGTERM stops new claims
+and gives active work up to five seconds to finish. Run only one application
+process against a given execution database.
+
+`/health` is liveness: the process answers HTTP. `/ready` returns 200 only when
+Research/Review migrations completed, the Job repository can be queried, and
+the worker is available; otherwise it returns 503 with diagnostic booleans.
+Neither endpoint contacts the research provider. Missing portfolio data does
+not make the process unready; submission explains that data must be loaded.
+
+Job logs are structured JSON with job ID, kind, attempt, state/progress, elapsed
+execution time and result review ID. For explicit logging in fish:
+
+```fish
+env RUST_LOG=epic_platform=info SCHWAB_DATA_DIR=/home/dylan/schwab-data RESEARCH_DB_PATH="$PWD/data/research.db" REVIEW_DB_PATH="$PWD/data/reviews.db" ./target/debug/epic-platform
+# Deterministic offline recovery tests, including queued restart and crash-after-commit:
+cargo test --locked --features ssr --test jobs
+```
 
 ## Checks
 
@@ -273,6 +327,8 @@ execution environments. Plain `cargo run` does not build the browser assets;
 use cargo-leptos and run its built executable. The manifest passes `--locked`
 to both Cargo builds. Node, npm, Trunk, and handwritten JavaScript are not needed.
 
+Read [Stage 5 architecture](docs/architecture-stage-05.md) for the durable queue,
+atomic claims, polling, idempotency, recovery, shutdown and readiness.
 Read [Stage 4 architecture](docs/architecture-stage-04.md) for review orchestration,
 immutable inputs, calculation definitions, separate database ownership and API behavior.
 Read [Stage 3 architecture](docs/architecture-stage-03.md) for module boundaries,
@@ -283,5 +339,5 @@ request/data flow, parsing rules, state lifetime and module responsibilities.
 Tests use synthetic fixtures and temporary directories, never the default data
 directory. Research tests use temporary databases and local mock HTTP servers;
 they never require internet access, ConsensX, or a production database. There is
-no authentication, scheduling, automatic refresh, AI analysis, or background jobs.
+no authentication, scheduling, automatic refresh, automatic job retry, or AI analysis.
 Old ConsensX database import is deferred; do not point `RESEARCH_DB_PATH` at it.
